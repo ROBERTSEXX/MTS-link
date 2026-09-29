@@ -21,7 +21,7 @@ python -m playwright install chromium
 ```bash
 source venv/bin/activate
 python download_mts_link.py \
-  "https://my.mts-link.ru/j/something/1944316221368/record-new/1865912320070" \
+  "https://my.mts-link.ru/j/something/xxx/record-new/xxx" \
   --output-dir downloads
 ```
 
