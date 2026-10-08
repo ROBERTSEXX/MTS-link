@@ -93,3 +93,30 @@ def test_cookies_are_sent_only_to_matching_hosts():
     assert "Cookie" not in other
     assert other["Referer"] == "https://my.mts-link.ru/j/a/b/record-new/1"
     assert other["Origin"] == "https://my.mts-link.ru"
+
+
+def test_event_link_is_recognized():
+    link = parse_link("https://my.mts-link.ru/j/62028239/25732076005")
+    assert link.kind is LinkKind.EVENT
+    assert link.event_id == "25732076005"
+    assert parse_link("https://my.mts-link.ru/j/a/b/record-new/1").kind is LinkKind.RECORDING
+
+
+def test_event_resolver_expands_sessions():
+    from mtslink_downloader.domain.models import DownloadJob
+    from mtslink_downloader.infrastructure.sources.events import EventResolver
+
+    class Http:
+        def get_json(self, url, headers):
+            assert url == "https://my.mts-link.ru/api/event/77"
+            return {"eventSessions": [
+                {"id": 1, "name": "Лекция 1", "status": "STOP"},
+                {"id": 2, "name": "Идёт сейчас", "status": "START"},
+                {"id": 3, "name": "Лекция 3", "status": "STOP"},
+            ]}
+
+    jobs, warnings = EventResolver(Http()).expand(  # type: ignore[arg-type]
+        [DownloadJob(parse_link("https://my.mts-link.ru/j/5/77"))]
+    )
+    assert not warnings
+    assert [(j.link.event_session_id, j.name) for j in jobs] == [("1", "Лекция 1"), ("3", "Лекция 3")]

@@ -159,6 +159,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
+    jobs, event_warnings = app.events.expand(jobs)
+    for warning in event_warnings:
+        print(f"Предупреждение: {warning}", file=sys.stderr)
+    if not jobs:
+        print("Ошибка: записей для скачивания не найдено.", file=sys.stderr)
+        return EXIT_FAILED
+
     if args.dry_run:
         failed = 0
         for job in jobs:

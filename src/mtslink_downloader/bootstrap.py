@@ -37,6 +37,7 @@ from mtslink_downloader.infrastructure.parsing.structured import StructuredRecor
 from mtslink_downloader.infrastructure.sources.api import ApiRecordSource
 from mtslink_downloader.infrastructure.sources.browser import BrowserRecordSource
 from mtslink_downloader.infrastructure.sources.endpoints import DEFAULT_API_HOSTS
+from mtslink_downloader.infrastructure.sources.events import EventResolver
 from mtslink_downloader.infrastructure.storage.catalog import JsonCompletedCatalog
 from mtslink_downloader.infrastructure.storage.cookies import load_cookies_file, session_cookie
 from mtslink_downloader.infrastructure.storage.report import JsonBatchReportWriter
@@ -90,6 +91,7 @@ def parse_strategy_list(value: str) -> tuple[str, ...]:
 class Application:
     batch: DownloadBatch
     inspect: InspectRecording
+    events: EventResolver
     strategy_names: tuple[str, ...]
 
 
@@ -188,4 +190,9 @@ class Container:
             enricher=self.enricher,
             planner=self.planner,
         )
-        return Application(batch=batch, inspect=inspect, strategy_names=downloader.strategy_names)
+        return Application(
+            batch=batch,
+            inspect=inspect,
+            events=EventResolver(self.http, self.cookies),
+            strategy_names=downloader.strategy_names,
+        )

@@ -18,6 +18,9 @@ from mtslink_downloader.domain.errors import InvalidLinkError
 _RECORD_PATH_RE = re.compile(
     r"/record-new/(?P<session>\d+)(?:/record-file/(?P<record>\d+))?/?$"
 )
+# Страница мероприятия без записи: /j/<org>/<event> или /<org>/<event>.
+# Её сессии (и записи) приходится спрашивать у API.
+_EVENT_PATH_RE = re.compile(r"^/(?:j/)?(?P<org>\d+)/(?P<event>\d+)/?$")
 _MEDIA_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".mkv", ".m3u8", ".mpd", ".m4a", ".mp3")
 
 
@@ -25,6 +28,7 @@ class LinkKind(Enum):
     """Тип ссылки определяет, какие способы скачивания к ней применимы."""
 
     RECORDING = "recording"
+    EVENT = "event"
     DIRECT_MEDIA = "direct-media"
     PAGE = "page"
 
@@ -38,6 +42,7 @@ class RecordingLink:
     origin: str
     event_session_id: str | None = None
     record_file_id: str | None = None
+    event_id: str | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -80,6 +85,9 @@ def parse_link(raw: str) -> RecordingLink:
             event_session_id=match.group("session"),
             record_file_id=match.group("record"),
         )
+    event = _EVENT_PATH_RE.match(parsed.path)
+    if event:
+        return RecordingLink(url=url, kind=LinkKind.EVENT, origin=origin, event_id=event.group("event"))
     if parsed.path.lower().endswith(_MEDIA_SUFFIXES):
         return RecordingLink(url=url, kind=LinkKind.DIRECT_MEDIA, origin=origin)
     return RecordingLink(url=url, kind=LinkKind.PAGE, origin=origin)

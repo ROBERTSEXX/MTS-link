@@ -57,7 +57,7 @@ class BrowserCaptureStrategy:
         self._wait_seconds = wait_seconds
 
     def supports(self, link: RecordingLink) -> bool:
-        return link.kind in {LinkKind.RECORDING, LinkKind.PAGE}
+        return link.kind in {LinkKind.RECORDING, LinkKind.PAGE, LinkKind.EVENT}
 
     def download(self, job: DownloadJob, settings: DownloadSettings) -> list[Path]:
         urls, title, access = self._capture(job.link)
