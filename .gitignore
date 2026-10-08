@@ -6,3 +6,9 @@ __pycache__/
 downloads/
 *.part
 .DS_Store
+.mtslink-work/
+mtslink-report.json
+mtslink-failed.txt
+.mypy_cache/
+.ruff_cache/
+*.egg-info/

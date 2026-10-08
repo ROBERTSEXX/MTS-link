@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtslink-downloader"
+version = "1.0.0"
+description = "Пакетное скачивание записей МТС Линк по списку ссылок всеми доступными способами"
+readme = "README.md"
+requires-python = ">=3.10"
+# Ядро работает на стандартной библиотеке + внешний ffmpeg/ffprobe.
+dependencies = []
+
+[project.optional-dependencies]
+browser = ["playwright>=1.45,<2"]
+ytdlp = ["yt-dlp>=2024.1"]
+all = ["playwright>=1.45,<2", "yt-dlp>=2024.1"]
+dev = ["pytest>=8", "playwright>=1.45,<2", "yt-dlp>=2024.1"]
+
+[project.scripts]
+mtslink-dl = "mtslink_downloader.presentation.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/downloader"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = [
+  "e2e: end-to-end tests with ffmpeg and a local HTTP server",
+  "browser: tests that launch Chromium through Playwright",
+]
