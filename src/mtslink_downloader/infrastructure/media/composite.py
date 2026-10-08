@@ -198,9 +198,31 @@ class CompositeRenderer:
                     except MtsLinkError as exc:
                         LOG.warning("Слайд «%s» не скачан: %s", update.slide_name or digest, exc)
                         continue
-                    result[update.image_url] = target
+                    result[update.image_url] = self._prepare_slide(target)
                     break
         return result
+
+    def _prepare_slide(self, source: Path) -> Path:
+        """Один раз вписать слайд в 1280×720 и сохранить в BMP.
+
+        С ``-loop 1`` ffmpeg декодирует картинку заново на каждом кадре:
+        PNG 1920×1080 при 25 кадрах/с занимает почти весь процессор. Готовый
+        BMP нужного размера читается почти бесплатно — рендер в ~3–4 раза
+        быстрее.
+        """
+
+        prepared = source.with_name(f"{source.stem}-{WIDTH}x{HEIGHT}.bmp")
+        if prepared.exists() and prepared.stat().st_size > 0:
+            return prepared
+        try:
+            self._ffmpeg.run(
+                ["-i", str(source), "-vf", fit_filter(), "-frames:v", "1", "-y", str(prepared)],
+                f"Подготовка слайда {source.name}",
+            )
+        except MtsLinkError as exc:
+            LOG.warning("Слайд %s не подготовлен (%s), использую исходник", source.name, exc)
+            return source
+        return prepared
 
 
 def _image_suffix(url: str) -> str:
