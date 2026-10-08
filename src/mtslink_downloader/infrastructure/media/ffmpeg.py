@@ -127,6 +127,19 @@ class Ffmpeg:
             if isinstance(stream, dict) and stream.get("codec_type")
         }
 
+    def is_complete(self, path: Path, expected_duration: float, tolerance: float = 1.0) -> bool:
+        """Готовый промежуточный файл можно взять повторно, не пересобирая.
+
+        Промежуточные файлы пишутся атомарно (через временное имя), поэтому
+        файл с правильной длительностью — точно законченный результат.
+        """
+
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        data = self._probe(["-show_entries", "format=duration", str(path)])
+        duration = _to_float((data.get("format") or {}).get("duration"))
+        return duration is not None and abs(duration - expected_duration) <= tolerance
+
     def stream_windows(self, path: Path) -> dict[str, tuple[float, float]]:
         """``тип → (начало, длительность)`` первой дорожки каждого типа."""
 

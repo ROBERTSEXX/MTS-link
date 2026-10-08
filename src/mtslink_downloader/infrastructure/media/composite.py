@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from mtslink_downloader.domain.errors import MediaProcessingError
+from mtslink_downloader.domain.errors import MediaProcessingError, MtsLinkError
 from mtslink_downloader.domain.models import (
     CompositeSegment,
     MediaAccess,
@@ -64,15 +65,20 @@ class CompositeRenderer:
     def normalize_speaker(self, source: Path, destination: Path) -> None:
         """Равномерные PTS камеры: иначе seek по склеенным сегментам «плывёт»."""
 
+        if self._ffmpeg.is_complete(destination, self._ffmpeg.duration(source)):
+            LOG.info("Нормализованное видео спикера уже есть, беру готовое")
+            return
+        partial = destination.with_name(f"{destination.stem}.part{destination.suffix}")
         self._ffmpeg.run(
             ["-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
              "-vf", f"setpts=PTS-STARTPTS,fps={NORMALIZED_FPS}", "-af", "asetpts=N/SR/TB",
              "-r", str(NORMALIZED_FPS),
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
              *AUDIO_ARGS, "-max_interleave_delta", "0", "-avoid_negative_ts", "make_zero",
-             "-movflags", "+faststart", "-y", str(destination)],
+             "-movflags", "+faststart", "-y", str(partial)],
             "Нормализация временных меток видео спикера",
         )
+        os.replace(partial, destination)
 
     def render(
         self,
@@ -97,18 +103,30 @@ class CompositeRenderer:
         rendered: list[Path] = []
         for index, segment in enumerate(timeline, start=1):
             target = rendered_dir / f"segment-{index:05d}.mp4"
-            if segment.kind == "speaker":
-                self.render_speaker(speaker, segment, target, audio)
-            elif segment.kind == "presentation":
-                if not segment.image_url or segment.image_url not in slides:
-                    raise MediaProcessingError("Нет изображения слайда для сводного видео.")
-                self.render_material(segment, speaker, slides[segment.image_url], target, 0.0, audio)
-            else:
+            rendered.append(target)
+            if self._ffmpeg.is_complete(target, segment.duration, tolerance=0.5):
+                continue  # участок уже собран в прошлый запуск
+            LOG.info(
+                "  участок %d из %d (%s, %s)",
+                index, len(timeline), segment.kind, format_duration(segment.duration),
+            )
+            partial = target.with_name(f"{target.stem}.part{target.suffix}")
+            slide = slides.get(segment.image_url or "")
+            if segment.kind == "presentation" and slide is None:
+                # Слайд не скачался ни по одному адресу: показываем спикера,
+                # а не теряем всё сводное видео.
+                LOG.warning("Нет изображения слайда — на этом участке будет спикер")
+                self.render_speaker(speaker, segment, partial, audio)
+            elif segment.kind == "presentation" and slide is not None:
+                self.render_material(segment, speaker, slide, partial, 0.0, audio)
+            elif segment.kind == "screen":
                 if screen is None:
                     raise MediaProcessingError("Временная шкала содержит экран без его файла.")
                 offset = max(0.0, segment.start_time - screen[1].start_time)
-                self.render_material(segment, speaker, screen[0], target, offset, audio)
-            rendered.append(target)
+                self.render_material(segment, speaker, screen[0], partial, offset, audio)
+            else:
+                self.render_speaker(speaker, segment, partial, audio)
+            os.replace(partial, target)
 
         combined = rendered_dir / "combined.mp4"
         self._concat.video(rendered, combined, duration)
@@ -172,8 +190,16 @@ class CompositeRenderer:
                     continue
                 digest = hashlib.sha256(update.image_url.split("?")[0].encode()).hexdigest()[:16]
                 target = directory / f"slide-{digest}{_image_suffix(update.image_url)}"
-                self._fetcher.fetch_file(update.image_url, target, access)
-                result[update.image_url] = target
+                for url in (update.image_url, update.alt_image_url):
+                    if not url:
+                        continue
+                    try:
+                        self._fetcher.fetch_file(url, target, access)
+                    except MtsLinkError as exc:
+                        LOG.warning("Слайд «%s» не скачан: %s", update.slide_name or digest, exc)
+                        continue
+                    result[update.image_url] = target
+                    break
         return result
 
 

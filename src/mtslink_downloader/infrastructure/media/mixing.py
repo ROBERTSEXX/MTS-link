@@ -61,12 +61,14 @@ class AudioMixer:
             + f"amix=inputs={len(labels)}:duration=first:dropout_transition=0:normalize=0,"
             "alimiter=limit=0.95:level=disabled[mixed]"
         )
+        partial = destination.with_name(f"{destination.stem}.part{destination.suffix}")
         self._ffmpeg.run(
             [*args, "-filter_complex", ";".join(filters), "-map", "[mixed]",
              "-t", f"{duration:.3f}", *AUDIO_ARGS, "-movflags", "+faststart",
-             "-y", str(destination)],
+             "-y", str(partial)],
             f"Сведение звука ({len(inputs)} фрагментов)",
         )
+        os.replace(partial, destination)
 
     def _mix_in_batches(
         self, inputs: Sequence[MixInput], destination: Path, duration: float

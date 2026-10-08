@@ -527,16 +527,21 @@ class StructuredRecordParser:
             )
             slide = reference.get("slide")
             slide_url: str | None = None
+            alt_slide_url: str | None = None
             slide_name: str | None = None
             if isinstance(slide, dict) and slide.get("name"):
                 slide_name = str(slide["name"])
                 group["displayed"].add(slide_name)
-                slide_url = _http_url(slide.get("downloadUrl")) or _http_url(slide.get("url"))
+                download_url = _http_url(slide.get("downloadUrl"))
+                file_url = _http_url(slide.get("url"))
+                slide_url = download_url or file_url
+                alt_slide_url = file_url if file_url != slide_url else None
             group["events"].append(
                 PresentationUpdate(
                     relative_time=relative_time,
                     is_active=data.get("isActive") is not False,
                     image_url=slide_url,
+                    alt_image_url=alt_slide_url,
                     slide_name=slide_name,
                 )
             )

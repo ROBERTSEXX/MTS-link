@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -159,13 +160,15 @@ class Concatenator:
         if not parts:
             raise MediaProcessingError("Нет частей для склейки видео.")
         list_path = _concat_list(parts, destination.with_suffix(".concat.txt"))
+        partial = destination.with_name(f"{destination.stem}.part{destination.suffix}")
         try:
             try:
                 self._require_same_parameters(parts)
-                self._run_concat(list_path, destination, duration)
+                self._run_concat(list_path, partial, duration)
             except MediaProcessingError as exc:
                 LOG.warning("Склейка копированием невозможна (%s), перекодирую части", exc)
-                self._normalized_concat(parts, destination, duration)
+                self._normalized_concat(parts, partial, duration)
+            os.replace(partial, destination)
         finally:
             list_path.unlink(missing_ok=True)
 

@@ -163,6 +163,7 @@ class PresentationUpdate:
     is_active: bool
     image_url: str | None = None
     slide_name: str | None = None
+    alt_image_url: str | None = None
 
 
 @dataclass

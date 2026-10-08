@@ -24,7 +24,7 @@ LOG = logging.getLogger(__name__)
 class HttpClient:
     """GET-запросы JSON и потоковое скачивание файлов с докачкой."""
 
-    def __init__(self, timeout: float = 60.0, retries: int = 3, backoff: float = 1.5) -> None:
+    def __init__(self, timeout: float = 60.0, retries: int = 6, backoff: float = 2.0) -> None:
         self._timeout = timeout
         self._retries = max(1, retries)
         self._backoff = backoff
@@ -99,7 +99,8 @@ class HttpClient:
             except (URLError, TimeoutError, ConnectionError, OSError) as exc:
                 last_error = exc
             if attempt < self._retries:
-                delay = self._backoff**attempt
+                # 2, 4, 8, 16, 30 с: обрывы соединения у хранилища бывают сериями.
+                delay = min(30.0, self._backoff**attempt)
                 LOG.debug("Повтор %s через %.1f с: %s", _short(url), delay, last_error)
                 time.sleep(delay)
         raise MediaProcessingError(f"Сетевая ошибка для {_short(url)}: {last_error}")

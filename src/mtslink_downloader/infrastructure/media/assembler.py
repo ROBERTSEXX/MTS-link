@@ -130,6 +130,9 @@ class TrackBuilder:
     ) -> Path:
         """Видеодорожка без звука на всё окно ``[start, end]``."""
 
+        if self._ffmpeg.is_complete(destination, end - start):
+            LOG.info("Видеодорожка %s уже собрана, беру готовую", destination.stem)
+            return destination
         candidates: list[tuple[SegmentPiece, object]] = [
             (piece, local)
             for local in locals_
@@ -170,6 +173,9 @@ class TrackBuilder:
     ) -> Path:
         """Звук всех файлов со звуком, каждый на своём месте окна."""
 
+        if self._ffmpeg.is_complete(destination, end - start):
+            LOG.info("Звук %s уже сведён, беру готовый", destination.stem)
+            return destination
         inputs = [
             MixInput(
                 path=local.path,
