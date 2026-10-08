@@ -12,6 +12,8 @@ from mtslink_downloader.domain.models import (
 )
 from mtslink_downloader.infrastructure.media.ffmpeg import Ffmpeg
 
+MAX_PROBES = 8
+
 
 class FfprobeEnricher:
     """Заполняет кодек, размер и активную длительность потоков.
@@ -28,12 +30,16 @@ class FfprobeEnricher:
         for stream in recording.video_streams:
             if not stream.segments:
                 continue
-            first = stream.segments[0].any_url
-            if stream.width is None or stream.height is None or stream.codec is None:
-                metadata = self._ffmpeg.probe_remote(first, access.headers_for(first), "v:0")
-                stream.codec = stream.codec or metadata.get("codec_name")
-                stream.width = stream.width or _int(metadata.get("width"))
-                stream.height = stream.height or _int(metadata.get("height"))
+            # Первые файлы камеры часто только со звуком (камера включена
+            # позже), поэтому ищем первый файл с картинкой.
+            for segment in stream.segments[:MAX_PROBES]:
+                if stream.codec is not None:
+                    break
+                url = segment.any_url
+                metadata = self._ffmpeg.probe_remote(url, access.headers_for(url), "v:0")
+                stream.codec = metadata.get("codec_name")
+                stream.width = _int(metadata.get("width"))
+                stream.height = _int(metadata.get("height"))
             if stream.key == SPEAKER_KEY and recording.duration > 0:
                 stream.duration = recording.duration
             elif stream.duration <= 0:
@@ -60,6 +66,8 @@ class FfprobeEnricher:
     def _active_duration(
         self, segments: list[MediaSegment], document: RecordDocument, selector: str
     ) -> float:
+        if all(segment.pieces is not None for segment in segments):
+            return sum(piece.length for segment in segments for piece in segment.pieces or [])
         total = 0.0
         for segment in segments:
             url = segment.any_url

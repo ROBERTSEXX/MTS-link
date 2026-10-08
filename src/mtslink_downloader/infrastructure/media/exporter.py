@@ -13,68 +13,50 @@ from mtslink_downloader.domain.models import (
     AudioStream,
     DownloadJob,
     DownloadSettings,
-    MediaAccess,
+    MediaSegment,
     RecordDocument,
     Recording,
     VideoStream,
 )
-from mtslink_downloader.infrastructure.media.assembler import StreamAssembler
+from mtslink_downloader.infrastructure.media.assembler import (
+    LocalSegment,
+    SegmentPreparer,
+    TrackBuilder,
+    window,
+)
 from mtslink_downloader.infrastructure.media.composite import CompositeRenderer
-from mtslink_downloader.infrastructure.media.fetching import copy_atomically
-from mtslink_downloader.infrastructure.media.mixing import AudioMixer, Muxer
+from mtslink_downloader.infrastructure.media.fetching import SegmentFetcher, copy_atomically
+from mtslink_downloader.infrastructure.media.mixing import Muxer
 from mtslink_downloader.infrastructure.storage.naming import OutputNamer
 
 LOG = logging.getLogger(__name__)
 
-
-class _Workspace:
-    """Локальные файлы одного экспорта; повторно не собирает одно и то же."""
-
-    def __init__(self, root: Path, assembler: StreamAssembler, access: MediaAccess) -> None:
-        self.root = root
-        self._assembler = assembler
-        self._access = access
-        self._videos: dict[str, Path] = {}
-        self._audios: dict[str, Path] = {}
-
-    def remember_video(self, key: str, path: Path) -> None:
-        self._videos[key] = path
-
-    def remember_audio(self, key: str, path: Path) -> None:
-        self._audios[key] = path
-
-    def video(self, stream: VideoStream) -> Path:
-        if stream.key not in self._videos:
-            target = self.root / f"{stream.key}.mp4"
-            self._videos[stream.key] = self._assembler.video(stream, target, self.root, self._access)
-        return self._videos[stream.key]
-
-    def audio(self, stream: AudioStream) -> Path:
-        if stream.key not in self._audios:
-            target = self.root / f"{stream.key}.m4a"
-            self._audios[stream.key] = self._assembler.audio(stream, target, self.root, self._access)
-        return self._audios[stream.key]
+Stream = VideoStream | AudioStream
 
 
 class FfmpegRecordingExporter:
     """Собирает файлы записи по ``ExportPlan``.
 
+    Все файлы записи скачиваются один раз и раскладываются по шкале: из
+    этого набора строятся и отдельные источники, и основной файл. Звук
+    основного файла — сведение всех участников, как в плеере МТС Линк.
     Уже существующие результаты не пересобираются (если не включена
-    перезапись), поэтому повторный запуск после сбоя доделывает только
-    недостающее, а промежуточные сегменты берутся из кэша рабочей папки.
+    перезапись), а скачанные файлы кэшируются для продолжения после сбоя.
     """
 
     def __init__(
         self,
-        assembler: StreamAssembler,
+        preparer: SegmentPreparer,
+        tracks: TrackBuilder,
         composite: CompositeRenderer,
-        mixer: AudioMixer,
         muxer: Muxer,
+        fetcher: SegmentFetcher,
     ) -> None:
-        self._assembler = assembler
+        self._preparer = preparer
+        self._tracks = tracks
         self._composite = composite
-        self._mixer = mixer
         self._muxer = muxer
+        self._fetcher = fetcher
 
     def export(
         self,
@@ -87,109 +69,148 @@ class FfmpegRecordingExporter:
         namer = OutputNamer(settings.output_dir)
         stem = namer.stem(job, recording.title)
         stem.parent.mkdir(parents=True, exist_ok=True)
-        work_root = namer.work_dir(job)
-        work_root.mkdir(parents=True, exist_ok=True)
-        workspace = _Workspace(work_root, self._assembler, document.access)
+        work = namer.work_dir(job)
+        work.mkdir(parents=True, exist_ok=True)
         outputs: list[Path] = []
 
-        def needed(path: Path) -> bool:
-            if path.exists() and not settings.overwrite:
-                LOG.info("Уже есть, пропускаю: %s", path.name)
-                outputs.append(path)
-                return False
-            return True
+        def missing(path: Path) -> bool:
+            return settings.overwrite or not path.exists()
+
+        main_path = namer.main(stem)
+        videos = [s for s in plan.separate_videos if missing(namer.video(stem, s.key))]
+        audios = [s for s in plan.separate_audios if missing(namer.audio(stem, s.key))]
+        build_main = missing(main_path)
+
+        # Картинка нужна только тем потокам, из которых строится видео; у
+        # остальных скачивается лишь звук.
+        video_keys = {stream.key for stream in videos}
+        if build_main and plan.main_video is not None:
+            video_keys.add(plan.main_video.key)
+            if plan.main_kind is MainKind.COMPOSITE and recording.screen is not None:
+                video_keys.add(recording.screen.key)
+
+        streams: list[Stream] = [*recording.video_streams, *recording.audio_streams]
+        wanted: list[tuple[MediaSegment, bool]] = []
+        if build_main or videos or audios:
+            wanted = [
+                (segment, stream.key in video_keys)
+                for stream in streams
+                for segment in stream.segments
+            ]
+        prepared = self._preparer.prepare(
+            wanted, work / "cache", document.access, recording.duration
+        )
+        local: dict[str, list[LocalSegment]] = {
+            stream.key: [prepared[id(seg)] for seg in stream.segments if id(seg) in prepared]
+            for stream in streams
+        }
+        duration = recording.duration
+        if duration <= 0:
+            ends = [span[1] for items in local.values() if (span := window(items))]
+            duration = max(ends, default=0.0)
 
         for stream in plan.separate_videos:
             path = namer.video(stem, stream.key)
-            if needed(path):
-                copy_atomically(workspace.video(stream), path)
-                outputs.append(path)
-            workspace.remember_video(stream.key, path)
+            if stream.key in {item.key for item in videos}:
+                self._separate_video(stream, local[stream.key], path, work)
+            outputs.append(path)
         for audio in plan.separate_audios:
             path = namer.audio(stem, audio.key)
-            if needed(path):
-                copy_atomically(workspace.audio(audio), path)
-                outputs.append(path)
-            workspace.remember_audio(audio.key, path)
+            if audio.key in {item.key for item in audios}:
+                self._separate_audio(audio, local[audio.key], path, work)
+            outputs.append(path)
         for presentation in plan.presentations:
-            path = namer.presentation(stem, presentation.key)
-            if needed(path):
-                self._assembler.presentation(presentation, path, work_root, document.access)
-                outputs.append(path)
+            # МТС Линк хранит исходник как есть: PDF, PPTX и т.д.
+            suffix = Path(presentation.file_name).suffix.lower() or ".pdf"
+            path = namer.presentation(stem, presentation.key, suffix)
+            if missing(path):
+                temp = work / f"{presentation.key}{suffix}"
+                self._fetcher.fetch_file(presentation.source_url, temp, document.access)
+                copy_atomically(temp, path)
+            outputs.append(path)
 
-        main_path = namer.main(stem)
-        if needed(main_path):
-            self._build_main(recording, plan, workspace, main_path, document.access)
-            outputs.append(main_path)
+        if build_main:
+            all_locals = [item for items in local.values() for item in items]
+            self._build_main(recording, plan, local, all_locals, duration, main_path, work, document)
+        else:
+            LOG.info("Уже есть, пропускаю: %s", main_path.name)
+        outputs.append(main_path)
 
         if not settings.keep_work_files:
-            shutil.rmtree(work_root, ignore_errors=True)
-            _remove_if_empty(work_root.parent)
+            shutil.rmtree(work, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                work.parent.rmdir()
         return outputs
+
+    # ------------------------------------------------------------------
+
+    def _separate_video(
+        self, stream: VideoStream, locals_: list[LocalSegment], destination: Path, work: Path
+    ) -> None:
+        span = window(locals_)
+        if span is None:
+            raise MediaProcessingError(f"У потока «{stream.title}» нет скачанных файлов.")
+        start, end = span
+        video = self._tracks.video(locals_, work / f"{stream.key}-video.mp4", start, end, work)
+        audio = self._tracks.audio(locals_, work / f"{stream.key}-audio.m4a", start, end)
+        self._muxer.mux(video, audio, destination)
+
+    def _separate_audio(
+        self, stream: AudioStream, locals_: list[LocalSegment], destination: Path, work: Path
+    ) -> None:
+        span = window(locals_)
+        if span is None:
+            raise MediaProcessingError(f"У потока «{stream.title}» нет скачанных файлов.")
+        audio = self._tracks.audio(locals_, work / f"{stream.key}-audio.m4a", *span)
+        self._muxer.audio_file(audio, destination)
 
     def _build_main(
         self,
         recording: Recording,
         plan: ExportPlan,
-        workspace: _Workspace,
+        local: dict[str, list[LocalSegment]],
+        all_locals: list[LocalSegment],
+        duration: float,
         destination: Path,
-        access: MediaAccess,
+        work: Path,
+        document: RecordDocument,
     ) -> None:
-        duration = recording.duration
-        extras = [(workspace.audio(stream), stream.start_time) for stream in plan.mixed_audio]
+        if duration <= 0:
+            raise MediaProcessingError("Не удалось определить длительность записи.")
+        audio = self._tracks.audio(all_locals, work / "main-audio.m4a", 0.0, duration)
 
-        if plan.main_kind is MainKind.AUDIO_ONLY:
-            mixed = workspace.root / "main-audio.m4a"
-            self._mixer.mix(None, extras, mixed, duration)
-            partial = _partial(destination)
-            self._muxer.black_video(mixed, partial, duration)
-            partial.replace(destination)
+        main_locals = local[plan.main_video.key] if plan.main_video is not None else []
+        if plan.main_kind is MainKind.AUDIO_ONLY or not any(i.has_video for i in main_locals):
+            if plan.main_kind is not MainKind.AUDIO_ONLY:
+                LOG.warning("В основном потоке нет картинки — будет чёрный фон со звуком")
+            self._muxer.black_video(audio, destination, duration)
             return
-
-        main_video = plan.main_video
-        if main_video is None:
-            raise MediaProcessingError("План не содержит основного видео.")
-        video_path = workspace.video(main_video)
+        video = self._tracks.video(main_locals, work / "main-video.mp4", 0.0, duration, work)
 
         if plan.main_kind is MainKind.VIDEO:
-            if not extras:
-                copy_atomically(video_path, destination)
-                return
-            mixed = workspace.root / "main-audio.m4a"
-            self._mixer.mix(video_path, extras, mixed, duration or main_video.duration)
-            partial = _partial(destination)
-            self._muxer.replace_audio(video_path, mixed, partial)
-            partial.replace(destination)
+            self._muxer.mux(video, audio, destination)
             return
 
         # Сводное видео: материалы основным кадром, спикер в углу.
-        normalized = workspace.root / "speaker-normalized.mp4"
-        if not normalized.exists():
-            self._composite.normalize_speaker(video_path, normalized)
-        audio_path = normalized
-        if extras:
-            audio_path = workspace.root / "main-audio.m4a"
-            self._mixer.mix(normalized, extras, audio_path, duration)
+        normalized = work / "speaker-normalized.mp4"
+        self._composite.normalize_speaker(video, normalized)
+        screen = None
         screen_stream = recording.screen
-        screen = (workspace.video(screen_stream), screen_stream) if screen_stream else None
+        if screen_stream is not None:
+            span = window(local[screen_stream.key])
+            if span is not None:
+                screen_stream.start_time, screen_stream.duration = span[0], span[1] - span[0]
+                screen_path = self._tracks.video(
+                    local[screen_stream.key], work / "screen-video.mp4", span[0], span[1], work
+                )
+                screen = (screen_path, screen_stream)
         self._composite.render(
             speaker=normalized,
-            audio=audio_path,
+            audio=audio,
             screen=screen,
             presentations=recording.presentations,
-            duration=duration or main_video.duration,
+            duration=duration,
             destination=destination,
-            work_dir=workspace.root,
-            access=access,
+            work_dir=work,
+            access=document.access,
         )
-
-
-def _remove_if_empty(path: Path) -> None:
-    with contextlib.suppress(OSError):
-        path.rmdir()
-
-
-def _partial(destination: Path) -> Path:
-    """Временное имя с исходным расширением: по нему ffmpeg выбирает контейнер."""
-
-    return destination.with_name(f"{destination.stem}.part{destination.suffix}")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
@@ -40,64 +39,6 @@ class SegmentEditor:
     def __init__(self, ffmpeg: Ffmpeg) -> None:
         self._ffmpeg = ffmpeg
 
-    # -- восстановление дорожек ------------------------------------------
-
-    def ensure_tracks(
-        self,
-        source: Path,
-        destination: Path,
-        want_audio: bool,
-        size: tuple[int, int] = (1280, 720),
-    ) -> Path:
-        """Добавить чёрное видео к аудио-only сегменту или тишину к немому."""
-
-        types = self._ffmpeg.stream_types(source)
-        has_video, has_audio = "video" in types, "audio" in types
-        if has_video and (has_audio or not want_audio):
-            return source
-        if not has_video and not has_audio:
-            raise MediaProcessingError(f"Сегмент {source.name} не содержит ни видео, ни звука.")
-
-        duration = self._ffmpeg.duration(source)
-        width, height = size
-        common = [
-            "-t",
-            f"{duration:.3f}",
-            *H264_ARGS,
-            "-r",
-            str(NORMALIZED_FPS),
-            *AUDIO_ARGS,
-            *STABLE_TS_ARGS,
-            "-movflags",
-            "+faststart",
-            "-y",
-            str(destination),
-        ]
-        if not has_video:
-            LOG.warning("Сегмент %s содержит только звук: добавляю чёрный кадр", source.name)
-            self._ffmpeg.run(
-                [
-                    "-f", "lavfi",
-                    "-i", f"color=c=black:s={width}x{height}:r={NORMALIZED_FPS}:d={duration:.3f}",
-                    "-i", str(source),
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    *common,
-                ],
-                f"Добавление видеоряда к {source.name}",
-            )
-        else:
-            LOG.warning("Сегмент %s без звука: добавляю тишину", source.name)
-            self._ffmpeg.run(
-                [
-                    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-                    "-i", str(source),
-                    "-map", "1:v:0", "-map", "0:a:0",
-                    *common,
-                ],
-                f"Добавление тишины к {source.name}",
-            )
-        return destination
-
     # -- заполнители ---------------------------------------------------------
 
     def video_gap(
@@ -119,118 +60,70 @@ class SegmentEditor:
         args += ["-avoid_negative_ts", "make_zero", "-y", str(destination)]
         self._ffmpeg.run(args, f"Заполнение паузы видео ({format_duration(duration)})")
 
-    def silence(self, destination: Path, duration: float) -> None:
-        self._ffmpeg.run(
-            [
-                "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-                "-t", f"{duration:.3f}", *AUDIO_ARGS,
-                "-movflags", "+faststart", "-y", str(destination),
-            ],
-            f"Заполнение паузы звука ({format_duration(duration)})",
-        )
-
     # -- обрезка -------------------------------------------------------------
 
-    def keep_tail(self, source: Path, destination: Path, seconds: float) -> None:
-        """Оставить последние ``seconds`` секунд (отрезать преролл)."""
-
-        duration = self._ffmpeg.duration(source)
-        if seconds <= 0 or seconds >= duration - 0.25:
-            shutil.copy2(source, destination)
-            return
-        self._cut_video(source, destination, start=duration - seconds, seconds=seconds)
-
-    def keep_head(self, source: Path, destination: Path, seconds: float) -> None:
-        """Оставить первые ``seconds`` секунд (убрать перекрытие snapshots)."""
-
-        if seconds <= 0:
-            raise MediaProcessingError("Нельзя создать сегмент нулевой длительности.")
-        duration = self._ffmpeg.duration(source)
-        if seconds >= duration - 0.25:
-            shutil.copy2(source, destination)
-            return
-        self._cut_video(source, destination, start=None, seconds=seconds)
-
-    def keep_audio_tail(self, source: Path, destination: Path, seconds: float) -> None:
-        duration = self._ffmpeg.duration(source)
-        if seconds <= 0 or seconds >= duration - 0.25:
-            shutil.copy2(source, destination)
-            return
-        self._cut_audio(source, destination, start=duration - seconds, seconds=seconds)
-
-    def keep_audio_head(self, source: Path, destination: Path, seconds: float) -> None:
-        if seconds <= 0:
-            raise MediaProcessingError("Нельзя создать аудиосегмент нулевой длительности.")
-        duration = self._ffmpeg.duration(source)
-        if seconds >= duration - 0.25:
-            shutil.copy2(source, destination)
-            return
-        self._cut_audio(source, destination, start=None, seconds=seconds)
-
-    def _cut_video(
-        self, source: Path, destination: Path, start: float | None, seconds: float
+    def cut_video(
+        self,
+        source: Path,
+        destination: Path,
+        offset: float,
+        length: float,
+        video_only: bool = False,
     ) -> None:
-        seek = ["-ss", f"{start:.3f}"] if start is not None else []
-        window = [*seek, "-t", f"{seconds:.3f}", "-map", "0:v:0", "-map", "0:a:0?"]
+        """Вырезать ``[offset, offset + length]`` из файла.
+
+        Сначала копированием без потери качества; если копирование потеряло
+        начало дорожки (нет ключевого кадра) — точным перекодированием.
+        """
+
+        if length <= 0:
+            raise MediaProcessingError("Нельзя вырезать фрагмент нулевой длительности.")
+        seek = ["-ss", f"{offset:.3f}"] if offset > 0.001 else []
+        maps = ["-map", "0:v:0"] if video_only else ["-map", "0:v:0", "-map", "0:a:0?"]
+        window = [*seek, "-t", f"{length:.3f}", *maps]
         self._ffmpeg.run(
             ["-i", str(source), *window, "-c", "copy",
              "-avoid_negative_ts", "make_zero", "-y", str(destination)],
-            f"Обрезка сегмента ({seconds:.1f} с)",
+            f"Вырезка фрагмента ({format_duration(length)})",
         )
-        required = {"video"} | ({"audio"} & self._ffmpeg.stream_types(source))
-        if self._copy_is_complete(destination, required, seconds):
+        required = {"video"}
+        if not video_only:
+            required |= {"audio"} & self._ffmpeg.stream_types(source)
+        if self._copy_is_complete(destination, required, length):
             return
-        LOG.warning("Обрезка копированием потеряла часть дорожки, перекодирую фрагмент точно")
+        LOG.warning("Копирование потеряло начало дорожки, перекодирую фрагмент точно")
         destination.unlink(missing_ok=True)
-        # Короткий фрагмент сохраняет кодек соседей, иначе concat-copy
-        # смешает VP9 и H.264 в одном контейнере.
+        # Фрагмент сохраняет кодек исходника, чтобы соседние части можно было
+        # склеить копированием.
         if self._ffmpeg.video_codec(source) == "vp9":
             encoder: tuple[str, ...] = (*VP9_ARGS, "-pix_fmt", "yuv420p")
         else:
             encoder = H264_ARGS
+        audio = () if video_only else AUDIO_ARGS
         self._ffmpeg.run(
-            ["-i", str(source), *window, *encoder, *AUDIO_ARGS,
+            ["-i", str(source), *window, *encoder, *audio,
              "-avoid_negative_ts", "make_zero", "-y", str(destination)],
-            f"Перекодирование обрезанного сегмента ({seconds:.1f} с)",
+            f"Перекодирование фрагмента ({format_duration(length)})",
         )
 
     def _copy_is_complete(self, path: Path, required: set[str], seconds: float) -> bool:
         """Копирование не потеряло начало ни одной дорожки.
 
         При ``-c copy`` ffmpeg отбрасывает видео до ближайшего ключевого
-        кадра: дорожка формально есть, но начинается на несколько секунд
-        позже звука. Такой файл после склейки сдвигает всё видео.
+        кадра: дорожка формально есть, но короче на несколько секунд и
+        начинается позже. Такой файл после склейки сдвигает всё видео.
         """
 
         windows = self._ffmpeg.stream_windows(path)
         if not required.issubset(windows):
             return False
         origin = min(start for start, _ in windows.values())
-        tolerance = max(0.5, seconds * 0.02)
+        tolerance = max(0.5, seconds * 0.01)
         for kind in required:
             start, duration = windows[kind]
             if start - origin > tolerance or duration < seconds - tolerance:
                 return False
         return True
-
-    def _cut_audio(
-        self, source: Path, destination: Path, start: float | None, seconds: float
-    ) -> None:
-        seek = ["-ss", f"{start:.3f}"] if start is not None else []
-        window = [*seek, "-t", f"{seconds:.3f}", "-map", "0:a:0", "-vn"]
-        self._ffmpeg.run(
-            ["-i", str(source), *window, "-c:a", "copy",
-             "-avoid_negative_ts", "make_zero", "-y", str(destination)],
-            f"Обрезка аудиосегмента ({seconds:.1f} с)",
-        )
-        if "audio" in self._ffmpeg.stream_types(destination):
-            return
-        destination.unlink(missing_ok=True)
-        self._ffmpeg.run(
-            ["-i", str(source), *window, *AUDIO_ARGS,
-             "-avoid_negative_ts", "make_zero", "-y", str(destination)],
-            f"Перекодирование аудиосегмента ({seconds:.1f} с)",
-        )
 
     # -- нормализация ----------------------------------------------------
 
@@ -269,30 +162,10 @@ class Concatenator:
         try:
             try:
                 self._require_same_parameters(parts)
-                self._run_concat(list_path, destination, duration, video=True)
+                self._run_concat(list_path, destination, duration)
             except MediaProcessingError as exc:
                 LOG.warning("Склейка копированием невозможна (%s), перекодирую части", exc)
                 self._normalized_concat(parts, destination, duration)
-        finally:
-            list_path.unlink(missing_ok=True)
-
-    def audio(self, parts: Sequence[Path], destination: Path, duration: float) -> None:
-        if not parts:
-            raise MediaProcessingError("Нет частей для склейки аудио.")
-        list_path = _concat_list(parts, destination.with_suffix(".concat.txt"))
-        try:
-            try:
-                self._require_same_parameters(parts)
-                self._run_concat(list_path, destination, duration, video=False)
-            except MediaProcessingError:
-                LOG.warning("Склейка аудио копированием невозможна, перекодирую")
-                args = ["-f", "concat", "-safe", "0", "-i", str(list_path),
-                        "-map", "0:a:0", "-vn",
-                        "-af", "asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0",
-                        *AUDIO_ARGS, "-movflags", "+faststart"]
-                if duration > 0:
-                    args += ["-t", f"{duration:.3f}"]
-                self._ffmpeg.run([*args, "-y", str(destination)], "Перекодирование аудиочастей")
         finally:
             list_path.unlink(missing_ok=True)
 
@@ -308,17 +181,17 @@ class Concatenator:
         if len(signatures) > 1:
             raise MediaProcessingError("у частей разные параметры кодирования")
 
-    def _run_concat(self, list_path: Path, destination: Path, duration: float, video: bool) -> None:
-        maps = ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"] if video else [
-            "-map", "0:a:0", "-vn", "-c:a", "copy"]
-        args = ["-f", "concat", "-safe", "0", "-i", str(list_path), *maps,
-                "-movflags", "+faststart"]
+    def _run_concat(self, list_path: Path, destination: Path, duration: float) -> None:
+        args = ["-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart"]
         if duration > 0:
             args += ["-t", f"{duration:.3f}"]
         self._ffmpeg.run([*args, "-y", str(destination)], "Склейка частей")
 
     def _normalized_concat(self, parts: Sequence[Path], destination: Path, duration: float) -> None:
-        with tempfile.TemporaryDirectory(prefix="mtslink-concat-") as temp_name:
+        # Временные части лежат рядом с результатом: для длинных записей это
+        # гигабайты, а /tmp бывает маленьким.
+        with tempfile.TemporaryDirectory(prefix="concat-", dir=destination.parent) as temp_name:
             temp_dir = Path(temp_name)
             width, height = self._ffmpeg.video_size(parts[0])
             width = max(2, (width or 1280) - (width or 1280) % 2)
@@ -329,4 +202,4 @@ class Concatenator:
                 self._editor.normalize(part, target, (width, height))
                 normalized.append(target)
             list_path = _concat_list(normalized, temp_dir / "parts.txt")
-            self._run_concat(list_path, destination, duration, video=True)
+            self._run_concat(list_path, destination, duration)

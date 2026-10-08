@@ -25,11 +25,14 @@ class MainKind(Enum):
 
 @dataclass(frozen=True)
 class ExportPlan:
-    """Что именно скачать и собрать для одной записи."""
+    """Что именно скачать и собрать для одной записи.
+
+    Звук основного файла всегда сводится из всех участников записи, поэтому
+    отдельного списка аудиоисточников план не содержит.
+    """
 
     main_kind: MainKind
     main_video: VideoStream | None
-    mixed_audio: tuple[AudioStream, ...] = ()
     separate_videos: tuple[VideoStream, ...] = ()
     separate_audios: tuple[AudioStream, ...] = ()
     presentations: tuple[PresentationStream, ...] = ()
@@ -81,7 +84,6 @@ class ExportPlanner:
         return ExportPlan(
             main_kind=main_kind,
             main_video=main_video if main_kind is not MainKind.AUDIO_ONLY else None,
-            mixed_audio=tuple(recording.audio_streams),
             separate_videos=separate_videos,
             separate_audios=separate_audios,
             presentations=presentations,

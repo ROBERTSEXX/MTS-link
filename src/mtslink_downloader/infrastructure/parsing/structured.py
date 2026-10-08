@@ -21,6 +21,7 @@ from mtslink_downloader.domain.models import (
     Recording,
     VideoStream,
 )
+from mtslink_downloader.domain.placement import EpochTimeline, attach_epoch_pieces
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -78,12 +79,23 @@ def media_segment(value: Any, relative_time: float, initial: bool) -> MediaSegme
     hls_url = _http_url(value.get("hlsUrl"))
     if not source_url and not hls_url:
         return None
+    media_id = value.get("id")
     return MediaSegment(
         source_url=source_url,
         hls_url=hls_url,
         relative_time=max(0.0, float(relative_time)),
         initial=initial,
+        media_id=str(media_id) if media_id is not None else None,
+        start_epoch=_epoch(value.get("time")),
     )
+
+
+def _epoch(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 1_000_000_000 else None
 
 
 class StructuredRecordParser:
@@ -98,6 +110,7 @@ class StructuredRecordParser:
         title = str(record.get("name") or "").strip()
 
         video_streams, audio_streams = self._media_streams(event_logs, total_duration)
+        self._attach_timing(record, event_logs, [*video_streams, *audio_streams])
         presentations = self._presentations(event_logs, total_duration)
         return Recording(
             title=title,
@@ -106,6 +119,59 @@ class StructuredRecordParser:
             audio_streams=audio_streams,
             presentations=presentations,
         )
+
+    # ------------------------------------------------------------------
+    # Точное время файлов
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _attach_timing(
+        record: dict[str, Any], event_logs: list[Any], streams: list[VideoStream | AudioStream]
+    ) -> None:
+        """Разложить файлы по шкале записи по их реальному времени.
+
+        ``mediasession.update`` сообщает время начала и длительность файла,
+        ``eventsession.start`` — начало мероприятия, ``cuts`` — вырезанные
+        паузы. Вместе они дают точное положение каждого файла даже тогда,
+        когда файлы разных участников идут одновременно.
+        """
+
+        start_epoch = next(
+            (
+                _epoch(event.get("time"))
+                for event in event_logs
+                if isinstance(event, dict) and event.get("module") == "eventsession.start"
+            ),
+            None,
+        )
+        if start_epoch is None:
+            return
+        cuts = [
+            (float(cut["start"]), float(cut["end"]))
+            for cut in record.get("cuts") or []
+            if isinstance(cut, dict) and _epoch(cut.get("start")) and _epoch(cut.get("end"))
+        ]
+        timeline = EpochTimeline.build(start_epoch, cuts)
+
+        updates: dict[str, dict[str, Any]] = {}
+        for event in event_logs:
+            if not isinstance(event, dict) or event.get("module") != "mediasession.update":
+                continue
+            data = event.get("data")
+            if isinstance(data, dict) and data.get("id") is not None:
+                updates[str(data["id"])] = data
+
+        for stream in streams:
+            for segment in stream.segments:
+                update = updates.get(segment.media_id or "")
+                if update is None:
+                    continue
+                duration = update.get("duration")
+                if isinstance(duration, (int, float)) and duration > 0:
+                    segment.known_duration = float(duration)
+                if segment.start_epoch is None:
+                    segment.start_epoch = _epoch(update.get("time"))
+                attach_epoch_pieces(segment, timeline)
 
     # ------------------------------------------------------------------
     # Конференции

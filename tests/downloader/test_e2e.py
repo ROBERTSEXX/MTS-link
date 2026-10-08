@@ -19,8 +19,11 @@ from mtslink_downloader.presentation.cli import main
 from .conftest import (
     HAS_FFMPEG,
     chromium_path,
+    mean_luma,
+    mean_volume,
     playwright_available,
     probe,
+    publish_seminar,
     publish_webinar,
 )
 
@@ -125,6 +128,24 @@ def test_all_mode_saves_every_source(tmp_path, fake_mts, media):
     assert probe(out / f"{stem}-screen-share.mp4")["duration"] == pytest.approx(5.0, abs=0.5)
     assert probe(out / f"{stem}-audio-2.m4a")["types"] == {"audio"}
     assert (out / f"{stem}-presentation.pdf").read_bytes().startswith(b"%PDF")
+
+
+def test_seminar_with_simultaneous_mics_is_placed_by_real_time(tmp_path, fake_mts, media):
+    url = publish_seminar(fake_mts, media)
+    summary, reporter, out = run(tmp_path, [url], ("api",))
+    assert summary.results[0].status is JobStatus.DONE, reporter.failures
+    video = out / "Семинар [7007].mp4"
+    info = probe(video)
+    assert info["types"] == {"video", "audio"}
+    assert info["duration"] == pytest.approx(20.0, abs=0.5)
+    # Камера лектора только 7–17 с, остальное время чёрный кадр.
+    assert mean_luma(video, 3.0) < 20
+    assert mean_luma(video, 12.0) > 60
+    assert mean_luma(video, 18.5) < 20
+    # Звук: микрофон лектора 0–7 с, участник 3–18 с поверх камеры, затем тишина.
+    assert mean_volume(video, 0.5, 2.0) > -40
+    assert mean_volume(video, 12.0, 4.0) > -40
+    assert mean_volume(video, 18.6, 1.2) < -60
 
 
 def test_private_record_needs_session_id(tmp_path, fake_mts, media):

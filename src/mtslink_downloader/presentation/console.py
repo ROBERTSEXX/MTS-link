@@ -95,5 +95,5 @@ def print_inspection(job: DownloadJob, inspection: Inspection, stream: TextIO | 
         "video": f"видео «{plan.main_video.title if plan.main_video else '?'}»",
         "audio-only": "звук на чёрном фоне",
     }[plan.main_kind.value]
-    extra = f" + голоса участников ({len(plan.mixed_audio)})" if plan.mixed_audio else ""
-    line(f"  Будет создано: {main}{extra}")
+    sources = len(recording.video_streams) + len(recording.audio_streams)
+    line(f"  Будет создано: {main}; звук — все участники ({sources} источников)")

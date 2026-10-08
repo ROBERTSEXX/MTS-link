@@ -53,8 +53,8 @@ class OutputNamer:
         return stem.with_name(f"{stem.name}-{key}.m4a")
 
     @staticmethod
-    def presentation(stem: Path, key: str) -> Path:
-        return stem.with_name(f"{stem.name}-{key}.pdf")
+    def presentation(stem: Path, key: str, suffix: str = ".pdf") -> Path:
+        return stem.with_name(f"{stem.name}-{key}{suffix}")
 
     def work_dir(self, job: DownloadJob) -> Path:
         """Рабочая папка задания: кэш сегментов для продолжения после сбоя."""

@@ -183,6 +183,8 @@ def media(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "full": make_av(root / "full.mp4", 6, size="320x240"),
         "flat1": make_av(root / "flat1.mp4", 5, size="320x240", tone=500),
         "flat2": make_av(root / "flat2.mp4", 5, size="320x240", tone=700),
+        "mic12": make_audio_only(root / "mic12.mp4", 12, tone=300),
+        "guest15": make_audio_only(root / "guest15.mp4", 15, tone=1200),
     }
 
 
@@ -267,3 +269,66 @@ def playwright_available() -> bool:
 
 
 RunBatch = Callable[..., Any]
+
+
+def publish_seminar(server: FakeMtsLink, media: dict[str, Path], session_id: str = "7007") -> str:
+    """Запись как у реального семинара: точное время файлов, пауза до начала
+    (``cuts``) и микрофон участника, звучащий одновременно с камерой лектора.
+
+    Шкала 20 с: микрофон лектора 0–7 с (первые 5 с файла вырезаны паузой),
+    камера лектора 7–17 с, микрофон участника 3–18 с (поверх камеры).
+    """
+
+    t0 = 1_700_000_000.0
+    mic = server.add_file(f"/storage/{session_id}/mic.mp4", media["mic12"], "video/mp4")
+    cam = server.add_file(f"/storage/{session_id}/cam.mp4", media["speaker_b"], "video/mp4")
+    guest = server.add_file(f"/storage/{session_id}/guest.mp4", media["guest15"], "video/mp4")
+    record = {
+        "name": "Семинар",
+        "duration": 20.0,
+        "cuts": [{"start": t0, "end": t0 + 100}],
+        "eventLogs": [
+            {"module": "eventsession.start", "relativeTime": 0, "time": t0},
+            {"module": "cut.end", "relativeTime": 0, "snapshot": {"data": {"mediasession": [
+                {"id": 1, "time": t0 + 95, "url": mic, "stream": {"conference": {"id": 10}}}]}}},
+            {"module": "conference.update", "relativeTime": 1.0, "data": {
+                "id": 10, "hasVideo": True, "hasAudio": True, "user": {"id": 7, "nickname": "Лектор"}}},
+            {"module": "mediasession.add", "relativeTime": 3.0, "data": {
+                "id": 3, "time": t0 + 103, "url": guest, "stream": {"conference": {"id": 30}}}},
+            {"module": "mediasession.update", "relativeTime": 7.0,
+             "data": {"id": 1, "time": t0 + 95, "duration": 12.0}},
+            {"module": "mediasession.add", "relativeTime": 7.0, "data": {
+                "id": 2, "time": t0 + 107, "url": cam, "stream": {"conference": {"id": 10}}}},
+            {"module": "mediasession.update", "relativeTime": 17.0,
+             "data": {"id": 2, "time": t0 + 107, "duration": 10.0}},
+            {"module": "mediasession.update", "relativeTime": 18.0,
+             "data": {"id": 3, "time": t0 + 103, "duration": 15.0}},
+            {"module": "eventsession.stop", "relativeTime": 20.0, "time": t0 + 120},
+        ],
+    }
+    server.add_json(f"/api/eventsessions/{session_id}/record", record)
+    return f"{server.base}/j/org/event/record-new/{session_id}"
+
+
+def mean_volume(path: Path, start: float, length: float) -> float:
+    completed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-ss", str(start), "-t", str(length), "-i", str(path),
+         "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True, check=True,
+    )
+    for line in completed.stderr.splitlines():
+        if "mean_volume:" in line:
+            return float(line.split("mean_volume:")[1].split()[0])
+    return -120.0
+
+
+def mean_luma(path: Path, at: float) -> float:
+    completed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-ss", str(at), "-i", str(path), "-frames:v", "1",
+         "-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-f", "null", "-"],
+        capture_output=True, text=True, check=True,
+    )
+    for line in completed.stderr.splitlines():
+        if "YAVG=" in line:
+            return float(line.split("YAVG=")[1])
+    raise AssertionError("YAVG не найден")

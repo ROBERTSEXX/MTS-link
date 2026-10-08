@@ -182,7 +182,6 @@ def test_planner_modes():
     with_materials = _recording_with(materials=True, audio=True)
     auto = planner.plan(with_materials, ExportMode.AUTO)
     assert auto.main_kind is MainKind.COMPOSITE
-    assert len(auto.mixed_audio) == 1
     assert not auto.separate_videos
 
     speaker_only = planner.plan(with_materials, ExportMode.SPEAKER)
@@ -197,3 +196,71 @@ def test_planner_modes():
     all_plain = planner.plan(plain, ExportMode.ALL)
     assert all_plain.main_kind is MainKind.VIDEO
     assert all_plain.separate_videos == ()
+
+
+def test_epoch_timeline_skips_cuts_and_places_files():
+    from mtslink_downloader.domain.placement import EpochTimeline
+
+    timeline = EpochTimeline.build(1000.0, [(1000.0, 1100.0), (1200.0, 1210.0)])
+    assert timeline.relative(1150.0) == 50.0
+    assert timeline.relative(1205.0) == 100.0
+    assert timeline.relative(1250.0) == 140.0
+    pieces = timeline.pieces(1090.0, 150.0)  # файл 1090–1240 пересекает обе паузы
+    assert [(p.file_offset, p.timeline_start, p.length) for p in pieces] == [
+        (10.0, 0.0, 100.0),
+        (120.0, 100.0, 30.0),
+    ]
+
+
+def test_parser_uses_exact_file_timing_from_updates():
+    recording = parse(
+        {
+            "duration": 30.0,
+            "cuts": [{"start": 1_700_000_000, "end": 1_700_000_100}],
+            "eventLogs": [
+                {"module": "eventsession.start", "relativeTime": 0, "time": 1_700_000_000},
+                {"relativeTime": 0, "snapshot": {"data": {"mediasession": [{
+                    "id": 1, "time": 1_700_000_095, "url": "https://s/a.mp4",
+                    "stream": {"conference": {"id": 5}}}]}}},
+                {"module": "mediasession.update", "relativeTime": 7.0,
+                 "data": {"id": 1, "time": 1_700_000_095, "duration": 12.0}},
+                {"module": "mediasession.add", "relativeTime": 7.0, "data": {
+                    "id": 2, "time": 1_700_000_107, "url": "https://s/b.mp4",
+                    "stream": {"conference": {"id": 5}}}},
+                {"module": "mediasession.update", "relativeTime": 17.0,
+                 "data": {"id": 2, "time": 1_700_000_107, "duration": 10.0}},
+            ],
+        }
+    )
+    first, second = recording.speaker.segments
+    assert [(p.file_offset, p.timeline_start, p.length) for p in first.pieces] == [(5.0, 0.0, 7.0)]
+    assert [(p.file_offset, p.timeline_start, p.length) for p in second.pieces] == [(0.0, 7.0, 10.0)]
+
+
+def test_video_overlaps_show_latest_and_resume_previous():
+    from mtslink_downloader.domain.models import SegmentPiece
+    from mtslink_downloader.domain.placement import without_overlaps
+
+    long_file, short_file = object(), object()
+    result = without_overlaps(
+        [(SegmentPiece(0.0, 0.0, 100.0), long_file), (SegmentPiece(0.0, 40.0, 10.0), short_file)]
+    )
+    assert [(p.file_offset, p.timeline_start, p.length, src) for p, src in result] == [
+        (0.0, 0.0, 40.0, long_file),
+        (0.0, 40.0, 10.0, short_file),
+        (50.0, 50.0, 50.0, long_file),
+    ]
+
+
+def test_place_segment_falls_back_to_journal_rules():
+    from mtslink_downloader.domain.models import MediaSegment
+    from mtslink_downloader.domain.placement import place_segment
+
+    preroll = MediaSegment("https://s/a.mp4", None, 0.0, initial=True, trim_duration=10.0)
+    assert [(p.file_offset, p.timeline_start, p.length) for p in place_segment(preroll, 12.0, 60.0)] == [
+        (2.0, 0.0, 10.0)
+    ]
+    limited = MediaSegment("https://s/b.mp4", None, 50.0, max_duration=5.0)
+    assert [(p.timeline_start, p.length) for p in place_segment(limited, 30.0, 60.0)] == [(50.0, 5.0)]
+    tail = MediaSegment("https://s/c.mp4", None, 50.0)
+    assert [(p.timeline_start, p.length) for p in place_segment(tail, 30.0, 60.0)] == [(50.0, 10.0)]

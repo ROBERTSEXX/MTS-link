@@ -24,7 +24,7 @@ from mtslink_downloader.infrastructure.browser.playwright_browser import (
     PlaywrightBrowser,
 )
 from mtslink_downloader.infrastructure.http import HttpClient
-from mtslink_downloader.infrastructure.media.assembler import StreamAssembler
+from mtslink_downloader.infrastructure.media.assembler import SegmentPreparer, TrackBuilder
 from mtslink_downloader.infrastructure.media.composite import CompositeRenderer
 from mtslink_downloader.infrastructure.media.editing import Concatenator, SegmentEditor
 from mtslink_downloader.infrastructure.media.enricher import FfprobeEnricher
@@ -120,10 +120,11 @@ class Container:
         editor = SegmentEditor(self.ffmpeg)
         concatenator = Concatenator(self.ffmpeg, editor)
         self.exporter = FfmpegRecordingExporter(
-            assembler=StreamAssembler(self.ffmpeg, fetcher, editor, concatenator),
+            preparer=SegmentPreparer(self.ffmpeg, fetcher),
+            tracks=TrackBuilder(self.ffmpeg, editor, concatenator, AudioMixer(self.ffmpeg)),
             composite=CompositeRenderer(self.ffmpeg, fetcher, concatenator),
-            mixer=AudioMixer(self.ffmpeg),
             muxer=Muxer(self.ffmpeg),
+            fetcher=fetcher,
         )
         self.saver = MediaUrlSaver(self.ffmpeg, self.http)
 

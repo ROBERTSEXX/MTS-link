@@ -74,6 +74,19 @@ class RecordDocument:
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class SegmentPiece:
+    """Часть файла ``[file_offset, file_offset + length]`` в момент записи."""
+
+    file_offset: float
+    timeline_start: float
+    length: float
+
+    @property
+    def timeline_end(self) -> float:
+        return self.timeline_start + self.length
+
+
 @dataclass
 class MediaSegment:
     """Один физический файл внутри логического потока.
@@ -81,7 +94,9 @@ class MediaSegment:
     ``relative_time`` — начало сегмента относительно всей записи.
     ``trim_duration`` — длина активного хвоста первого файла (отрезает
     преролл). ``max_duration`` ограничивает файл с начала, если следующий
-    snapshot заменяет его раньше конца.
+    snapshot заменяет его раньше конца. ``pieces`` — точная раскладка по
+    реальному времени файла, если журнал её позволяет; она главнее правил
+    ``trim_duration``/``max_duration``.
     """
 
     source_url: str
@@ -90,6 +105,10 @@ class MediaSegment:
     initial: bool = False
     trim_duration: float | None = None
     max_duration: float | None = None
+    media_id: str | None = None
+    start_epoch: float | None = None
+    known_duration: float | None = None
+    pieces: list[SegmentPiece] | None = None
 
     @property
     def any_url(self) -> str:
