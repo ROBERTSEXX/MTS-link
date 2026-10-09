@@ -120,3 +120,9 @@ def test_event_resolver_expands_sessions():
     )
     assert not warnings
     assert [(j.link.event_session_id, j.name) for j in jobs] == [("1", "Лекция 1"), ("3", "Лекция 3")]
+
+
+def test_event_session_player_link():
+    link = parse_link("https://my.mts-link.ru/event/25732076005/25203243050")
+    assert link.kind is LinkKind.RECORDING
+    assert (link.event_id, link.event_session_id) == ("25732076005", "25203243050")

@@ -20,6 +20,8 @@ _RECORD_PATH_RE = re.compile(
 )
 # Страница мероприятия без записи: /j/<org>/<event> или /<org>/<event>.
 # Её сессии (и записи) приходится спрашивать у API.
+# Плеер записи: /event/<event>/<session> — сессия известна сразу.
+_EVENT_SESSION_RE = re.compile(r"^/event/(?P<event>\d+)/(?P<session>\d+)/?$")
 _EVENT_PATH_RE = re.compile(r"^/(?:j/)?(?P<org>\d+)/(?P<event>\d+)/?$")
 _MEDIA_SUFFIXES = (".mp4", ".m4v", ".mov", ".webm", ".mkv", ".m3u8", ".mpd", ".m4a", ".mp3")
 
@@ -84,6 +86,15 @@ def parse_link(raw: str) -> RecordingLink:
             origin=origin,
             event_session_id=match.group("session"),
             record_file_id=match.group("record"),
+        )
+    event_session = _EVENT_SESSION_RE.match(parsed.path)
+    if event_session:
+        return RecordingLink(
+            url=url,
+            kind=LinkKind.RECORDING,
+            origin=origin,
+            event_session_id=event_session.group("session"),
+            event_id=event_session.group("event"),
         )
     event = _EVENT_PATH_RE.match(parsed.path)
     if event:
