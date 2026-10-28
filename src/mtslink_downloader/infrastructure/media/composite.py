@@ -90,7 +90,10 @@ class CompositeRenderer:
         destination: Path,
         work_dir: Path,
         access: MediaAccess,
+        show_pip: bool = True,
     ) -> Path:
+        """``show_pip=False`` — у спикера нет камеры: материалы без окна в углу."""
+
         screen_stream = screen[1] if screen else None
         timeline = build_composite_timeline(duration, presentations, screen_stream)
         if not timeline:
@@ -118,12 +121,12 @@ class CompositeRenderer:
                 LOG.warning("Нет изображения слайда — на этом участке будет спикер")
                 self.render_speaker(speaker, segment, partial, audio)
             elif segment.kind == "presentation" and slide is not None:
-                self.render_material(segment, speaker, slide, partial, 0.0, audio)
+                self.render_material(segment, speaker, slide, partial, 0.0, audio, show_pip)
             elif segment.kind == "screen":
                 if screen is None:
                     raise MediaProcessingError("Временная шкала содержит экран без его файла.")
                 offset = max(0.0, segment.start_time - screen[1].start_time)
-                self.render_material(segment, speaker, screen[0], partial, offset, audio)
+                self.render_material(segment, speaker, screen[0], partial, offset, audio, show_pip)
             else:
                 self.render_speaker(speaker, segment, partial, audio)
             os.replace(partial, target)
@@ -157,6 +160,7 @@ class CompositeRenderer:
         destination: Path,
         background_offset: float,
         audio: Path,
+        show_pip: bool = True,
     ) -> None:
         if segment.kind == "presentation":
             inputs = ["-loop", "1", "-framerate", str(FPS), "-i", str(background)]
@@ -167,12 +171,15 @@ class CompositeRenderer:
         if audio != speaker:
             inputs += ["-ss", f"{segment.start_time:.3f}", "-i", str(audio)]
             audio_index = 2
-        filter_complex = (
-            f"[0:v]{fit_filter()}[background];"
-            f"[1:v]{pip_filter()}[speaker];"
-            f"[background][speaker]overlay=main_w-overlay_w-{MARGIN}:{MARGIN}:format=auto"
-            ":eof_action=pass[v]"
-        )
+        if show_pip:
+            filter_complex = (
+                f"[0:v]{fit_filter()}[background];"
+                f"[1:v]{pip_filter()}[speaker];"
+                f"[background][speaker]overlay=main_w-overlay_w-{MARGIN}:{MARGIN}:format=auto"
+                ":eof_action=pass[v]"
+            )
+        else:
+            filter_complex = f"[0:v]{fit_filter()}[v]"
         self._ffmpeg.run(
             [*inputs, "-filter_complex", filter_complex, "-map", "[v]",
              "-map", f"{audio_index}:a:0?", "-t", f"{segment.duration:.3f}",

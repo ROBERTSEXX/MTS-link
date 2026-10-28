@@ -269,3 +269,26 @@ def test_sniff_strategy_captures_player_stream(tmp_path, fake_mts, media):
     # Идентификатор «42» уже есть в названии страницы и повторно не добавляется.
     assert result.outputs[0].name == "Урок 42.mp4"
     assert probe(result.outputs[0])["duration"] == pytest.approx(6.0, abs=0.5)
+
+
+def test_screen_share_kept_when_speaker_has_no_camera(tmp_path, fake_mts, media):
+    """Лектор говорит без камеры: экран не должен пропадать из сводного видео."""
+
+    mic = fake_mts.add_file("/storage/8008/mic.mp4", media["mic12"], "video/mp4")
+    screen = fake_mts.add_file("/storage/8008/screen.mp4", media["screen"], "video/mp4")
+    fake_mts.add_json("/api/eventsessions/8008/record", {
+        "name": "Без камеры", "duration": 12.0, "eventLogs": [
+            {"module": "conference.update", "relativeTime": 0.0,
+             "data": {"id": 1, "hasVideo": False, "hasAudio": True}},
+            {"relativeTime": 0.0, "snapshot": {"data": {"mediasession": [
+                {"url": mic, "stream": {"conference": {"id": 1}}}]}}},
+            {"module": "mediasession.add", "relativeTime": 3.0,
+             "data": {"url": screen, "stream": {"screensharing": {"id": 2}}}},
+        ]})
+    url = f"{fake_mts.base}/j/org/event/record-new/8008"
+    summary, reporter, out = run(tmp_path, [url], ("api",))
+    assert summary.results[0].status is JobStatus.DONE, reporter.failures
+    video = out / "Без камеры [8008].mp4"
+    assert mean_luma(video, 1.0) < 20  # до демонстрации — чёрный кадр
+    assert mean_luma(video, 5.0) > 60  # демонстрация экрана на месте
+    assert mean_volume(video, 4.0, 3.0) > -40

@@ -180,7 +180,12 @@ class FfmpegRecordingExporter:
         audio = self._tracks.audio(all_locals, work / "main-audio.m4a", 0.0, duration)
 
         main_locals = local[plan.main_video.key] if plan.main_video is not None else []
-        if plan.main_kind is MainKind.AUDIO_ONLY or not any(i.has_video for i in main_locals):
+        has_camera = any(i.has_video for i in main_locals)
+        # Без камеры спикера сводное видео всё равно нужно: слайды и экран
+        # не должны теряться только из-за того, что лектор говорил без видео.
+        if plan.main_kind is MainKind.AUDIO_ONLY or (
+            not has_camera and plan.main_kind is not MainKind.COMPOSITE
+        ):
             if plan.main_kind is not MainKind.AUDIO_ONLY:
                 LOG.warning("В основном потоке нет картинки — будет чёрный фон со звуком")
             self._muxer.black_video(audio, destination, duration)
@@ -213,4 +218,5 @@ class FfmpegRecordingExporter:
             destination=destination,
             work_dir=work,
             access=document.access,
+            show_pip=has_camera,
         )
